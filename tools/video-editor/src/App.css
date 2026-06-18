@@ -16,7 +16,34 @@
 }
 .topbar-spacer { flex: 1; }
 .project-name { font-weight: 600; }
-.audio-status { color: var(--text-dim); }
+.audio-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.audio-label {
+  font-size: 12px;
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.audio-control input[type="range"] {
+  width: 100px;
+}
+.audio-remove {
+  padding: 0 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+}
+.audio-remove:hover { color: var(--accent); background: transparent; }
 
 .workspace {
   display: grid;

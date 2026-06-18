@@ -10,6 +10,7 @@ import { MediaBin } from './components/MediaBin'
 import { Preview } from './components/Preview'
 import { Timeline } from './components/Timeline'
 import { Inspector } from './components/Inspector'
+import { TopBar } from './components/TopBar'
 
 function App() {
   const [project, dispatch] = useReducer(projectReducer, initialProject)
@@ -31,13 +32,27 @@ function App() {
 
   return (
     <div className="app">
-      <header className="topbar">
-        <span className="project-name">Untitled</span>
-        <button onClick={() => dispatch({ type: 'NEW_PROJECT' })}>New project</button>
-        <div className="topbar-spacer" />
-        <span className="audio-status">no audio</span>
-        <button disabled>Export</button>
-      </header>
+      <TopBar
+        audio={project.audio}
+        dispatch={dispatch}
+        onNewProject={() => {
+          if (project.clips.length > 0 || project.audio) {
+            if (!confirm('Discard current project? Unsaved edits will be lost.')) return
+          }
+          dispatch({ type: 'NEW_PROJECT' })
+          setSelectedClipId(null)
+        }}
+        onExport={() => { /* TODO: export modal */ }}
+        onExportProjectJson={() => {
+          const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = 'project.json'
+          a.click()
+          URL.revokeObjectURL(url)
+        }}
+      />
 
       <main className="workspace">
         <section className="panel media-bin">
