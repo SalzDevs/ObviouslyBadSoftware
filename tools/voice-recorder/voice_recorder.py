@@ -206,26 +206,41 @@ def run_record(args, device_idx, device_info, output_path, duration):
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    if duration > 0:
-        threading.Timer(duration, stop_event.set).start()
-
     def callback(indata, frames, time_info, status):
         if status:
             # Input overflow or similar — surface it but don't stop.
             print(f"\raudio status: {status}", file=sys.stderr, end="\n")
         q.put(indata.copy())
 
-    started_at = time.monotonic()
-    peak_db = VU_DB_FLOOR
-    frames_since_peak = VU_PEAK_HOLD_FRAMES
-    next_render = started_at
+    # VU state (mutable dict so the helper can update it)
+    vu = {"peak_db": VU_DB_FLOOR, "frames_since_peak": VU_PEAK_HOLD_FRAMES,
+          "next_render": time.monotonic()}
 
-    wav = sf.SoundFile(
-        output_path, mode="w",
-        samplerate=args.sample_rate,
-        channels=CHANNELS,
-        subtype=SUBTYPE,
-    )
+    def process_frame(data):
+        """Write to WAV if recording has started, then update the VU meter."""
+        if recording_started.is_set():
+            wav.write(data)
+        if args.quiet:
+            return
+        rms = float(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
+        db = 20.0 * np.log10(rms / 32768.0) if rms > 0 else VU_DB_FLOOR
+        now = time.monotonic()
+        if now < vu["next_render"]:
+            return
+        if db > vu["peak_db"]:
+            vu["peak_db"] = db
+            vu["frames_since_peak"] = 0
+        elif vu["frames_since_peak"] < VU_PEAK_HOLD_FRAMES:
+            vu["frames_since_peak"] += 1
+        else:
+            vu["peak_db"] = max(VU_DB_FLOOR, vu["peak_db"] - VU_PEAK_DECAY_PER_FRAME)
+        render_vu(db, vu["peak_db"])
+        vu["next_render"] = now + 1.0 / VU_TARGET_FPS
+
+    recording_started = threading.Event()
+    started_at = None
+    wav = None
+
     stream = sd.InputStream(
         samplerate=args.sample_rate,
         device=device_idx,
@@ -235,33 +250,63 @@ def run_record(args, device_idx, device_info, output_path, duration):
         callback=callback,
     )
     try:
-        with stream, wav:
+        with stream:
             if not args.quiet:
                 sys.stdout.write("\x1b[?25l")  # hide cursor
                 sys.stdout.flush()
+
+            # Countdown phase: open the mic, show the VU meter, but don't
+            # write to the WAV. Lets the user see the level before talking.
+            if not args.now and args.countdown > 0 and not stop_event.is_set():
+                sys.stderr.write(f"starting in {args.countdown} seconds... (Ctrl+C to cancel)\n")
+                for i in range(args.countdown, 0, -1):
+                    if stop_event.is_set():
+                        break
+                    sys.stderr.write(f"  {i}...\n")
+                    sys.stderr.flush()
+                    end = time.monotonic() + 1.0
+                    while time.monotonic() < end and not stop_event.is_set():
+                        try:
+                            data = q.get(timeout=0.05)
+                            process_frame(data)
+                        except queue.Empty:
+                            pass
+                # Drop any pre-roll audio so the WAV doesn't start with a
+                # quarter-second of countdown silence.
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+
+            if stop_event.is_set():
+                # Cancelled during countdown — no WAV was ever opened.
+                if not args.quiet:
+                    sys.stdout.write("\x1b[?25h\n")
+                sys.stderr.write("cancelled\n")
+                return None, EXIT_OK
+
+            # Now open the WAV and start the duration timer.
+            wav = sf.SoundFile(
+                output_path, mode="w",
+                samplerate=args.sample_rate,
+                channels=CHANNELS,
+                subtype=SUBTYPE,
+            )
+            if duration > 0:
+                threading.Timer(duration, stop_event.set).start()
+            started_at = time.monotonic()
+            recording_started.set()
+
+            # Recording loop
             while not stop_event.is_set():
                 try:
                     data = q.get(timeout=0.05)
                 except queue.Empty:
                     continue
-                wav.write(data)
-                if args.quiet:
-                    continue
-                # RMS over the captured frames, in dBFS.
-                rms = float(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
-                db = 20.0 * np.log10(rms / 32768.0) if rms > 0 else VU_DB_FLOOR
-                now = time.monotonic()
-                if now >= next_render:
-                    if db > peak_db:
-                        peak_db = db
-                        frames_since_peak = 0
-                    elif frames_since_peak < VU_PEAK_HOLD_FRAMES:
-                        frames_since_peak += 1
-                    else:
-                        peak_db = max(VU_DB_FLOOR, peak_db - VU_PEAK_DECAY_PER_FRAME)
-                    render_vu(db, peak_db)
-                    next_render = now + 1.0 / VU_TARGET_FPS
-            # Drain any remaining frames the callback put on the queue.
+                process_frame(data)
+
+            # Drain anything the callback put on the queue after stop.
             while True:
                 try:
                     data = q.get_nowait()
@@ -270,21 +315,26 @@ def run_record(args, device_idx, device_info, output_path, duration):
                 wav.write(data)
     except sd.PortAudioError as e:
         if not args.quiet:
-            sys.stdout.write("\x1b[?25h\n")  # restore cursor
+            sys.stdout.write("\x1b[?25h\n")
             sys.stdout.flush()
         print(f"error: audio device error: {e}", file=sys.stderr)
-        try:
-            os.remove(output_path)
-        except OSError:
-            pass
+        for path in (output_path, output_path + ".json"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         return None, EXIT_MIC_ISSUE
     finally:
         if not args.quiet:
             sys.stdout.write("\x1b[?25h\n")
             sys.stdout.flush()
+        if wav is not None:
+            wav.close()
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
+    if started_at is None:
+        return None, EXIT_OK
     return time.monotonic() - started_at, EXIT_OK
 
 
