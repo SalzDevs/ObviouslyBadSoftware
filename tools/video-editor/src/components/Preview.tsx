@@ -14,6 +14,15 @@ export function Preview({ clip }: Props) {
     )
   }
 
+  const t = clip.text
+  const positionStyle = t
+    ? t.position === 'top'
+      ? { top: '8%' }
+      : t.position === 'bottom'
+        ? { bottom: '8%' }
+        : { top: '50%', transform: 'translateY(-50%)' }
+    : {}
+
   return (
     <div className="preview-inner">
       <h2>Preview</h2>
@@ -24,6 +33,18 @@ export function Preview({ clip }: Props) {
           controls
           preload="metadata"
         />
+        {t && t.content && (
+          <div
+            className="text-overlay"
+            style={{
+              ...positionStyle,
+              color: t.color,
+              fontSize: `${t.fontSize}px`,
+            }}
+          >
+            {t.content}
+          </div>
+        )}
       </div>
       <p className="preview-meta">
         {clip.filename} &middot; {clip.duration.toFixed(1)}s
