@@ -245,3 +245,8 @@
   height: 28px;
   padding: 2px;
 }
+.reorder-row {
+  display: flex;
+  gap: 6px;
+}
+.reorder-row button { flex: 1; font-size: 12px; }

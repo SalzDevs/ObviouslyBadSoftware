@@ -3,6 +3,8 @@ import type { Clip, TextOverlay, TextPreset } from '../types'
 
 interface Props {
   clip: Clip | null
+  index: number
+  total: number
   dispatch: (action: Action) => void
 }
 
@@ -39,7 +41,7 @@ function NumberField({ label, value, min, max, step, onChange }: {
   )
 }
 
-export function Inspector({ clip, dispatch }: Props) {
+export function Inspector({ clip, index, total, dispatch }: Props) {
   if (!clip) {
     return (
       <div className="inspector-inner">
@@ -87,7 +89,23 @@ export function Inspector({ clip, dispatch }: Props) {
       <h2>Inspector</h2>
       <div className="inspector-section">
         <div className="inspector-filename" title={clip.filename}>{clip.filename}</div>
-        <div className="inspector-duration">duration: {clip.duration.toFixed(2)}s</div>
+        <div className="inspector-duration">duration: {clip.duration.toFixed(2)}s &middot; clip {index + 1} of {total}</div>
+        <div className="reorder-row">
+          <button
+            disabled={index === 0}
+            onClick={() => dispatch({ type: 'REORDER_CLIPS', from: index, to: index - 1 })}
+            title="move left (also: drag in the timeline)"
+          >
+            ← move left
+          </button>
+          <button
+            disabled={index >= total - 1}
+            onClick={() => dispatch({ type: 'REORDER_CLIPS', from: index, to: index + 1 })}
+            title="move right (also: drag in the timeline)"
+          >
+            move right →
+          </button>
+        </div>
       </div>
 
       <div className="inspector-section">

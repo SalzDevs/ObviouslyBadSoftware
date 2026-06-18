@@ -60,10 +60,17 @@ function App() {
         </section>
 
         <section className="panel inspector">
-          <Inspector
-            clip={project.clips.find(c => c.id === selectedClipId) ?? null}
-            dispatch={dispatch}
-          />
+          {(() => {
+            const idx = project.clips.findIndex(c => c.id === selectedClipId)
+            return (
+              <Inspector
+                clip={idx >= 0 ? project.clips[idx] : null}
+                index={idx}
+                total={project.clips.length}
+                dispatch={dispatch}
+              />
+            )
+          })()}
         </section>
       </main>
     </div>
