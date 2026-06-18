@@ -306,9 +306,17 @@ func runRecord(f *flags) error {
 	fmt.Fprintf(os.Stderr, "recording %dx%d @ %dfps (%s) to %s\n", w, h, f.fps, f.codec, outputPath)
 	recordingStart := time.Now()
 
-	// Auto-stop after --duration.
+	// Auto-stop after --duration. The countdown starts from the first
+	// captured frame so the recorded video's duration matches the flag
+	// even when ffmpeg/libx264 take time to warm up.
+	firstFrame := make(chan struct{})
 	if f.duration > 0 {
 		go func() {
+			select {
+			case <-firstFrame:
+			case <-ctx.Done():
+				return
+			}
 			select {
 			case <-time.After(f.duration):
 				cancel()
@@ -382,6 +390,11 @@ func runRecord(f *flags) error {
 					return permissionError(err)
 				}
 				return &exitError{code: exitGenericError, err: err}
+			}
+			select {
+			case <-firstFrame:
+			default:
+				close(firstFrame)
 			}
 		}
 	}
