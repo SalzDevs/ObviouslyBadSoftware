@@ -6,6 +6,7 @@ import {
   projectReducer,
   saveProject,
 } from './state'
+import { MediaBin } from './components/MediaBin'
 
 function App() {
   const [project, dispatch] = useReducer(projectReducer, initialProject)
@@ -37,8 +38,7 @@ function App() {
 
       <main className="workspace">
         <section className="panel media-bin">
-          <h2>Media bin</h2>
-          <p className="empty">drag video files here</p>
+          <MediaBin clips={project.clips} dispatch={dispatch} />
         </section>
 
         <section className="panel preview">
