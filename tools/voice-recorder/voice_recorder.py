@@ -10,10 +10,16 @@ stop. The WAV and a JSON sidecar land in ./recordings/ by default.
 import argparse
 import json
 import os
+import queue
+import signal
 import sys
+import threading
+import time
 from datetime import datetime
 
+import numpy as np
 import sounddevice as sd
+import soundfile as sf
 
 __version__ = "0.1.0"
 
@@ -23,6 +29,21 @@ EXIT_GENERIC = 1
 EXIT_FFMPEG_MISSING = 2  # reserved, not used by this tool
 EXIT_MIC_ISSUE = 3
 EXIT_BAD_FLAGS = 4
+
+# Audio format constants (channels and bit depth are fixed; only sample rate
+# and device are configurable via flags).
+CHANNELS = 1
+SUBTYPE = "PCM_16"
+DTYPE = "int16"
+BLOCK_SIZE = 1024  # frames per audio callback (~23ms at 44.1kHz)
+
+# VU meter config
+VU_WIDTH = 30
+VU_DB_FLOOR = -60.0
+VU_DB_CEIL = 0.0
+VU_PEAK_HOLD_FRAMES = 3      # 150ms hold before decay starts
+VU_PEAK_DECAY_PER_FRAME = 2.0 # dB per render frame; 30 frames ≈ 1.5s tail
+VU_TARGET_FPS = 20
 
 
 def parse_flags(argv=None):
@@ -146,6 +167,127 @@ def resolve_device(spec):
     return matches[0]
 
 
+def render_vu(db, peak_db, width=VU_WIDTH):
+    """Render a single VU meter line in place on the terminal.
+
+    db is the current RMS in dBFS; peak_db is the held peak (may be lower
+    than db if a louder frame was just captured). Uses \r + ANSI clear-line
+    so the same line overwrites itself on each call.
+    """
+    def to_pos(d):
+        if d <= VU_DB_FLOOR:
+            return 0
+        if d >= VU_DB_CEIL:
+            return width
+        return int((d - VU_DB_FLOOR) / (VU_DB_CEIL - VU_DB_FLOOR) * width)
+
+    cur = to_pos(db)
+    peak = to_pos(peak_db)
+    parts = []
+    for i in range(width):
+        if i < cur:
+            parts.append("█")
+        elif i == peak and peak > cur:
+            parts.append("│")
+        else:
+            parts.append("░")
+    sys.stdout.write("\r\x1b[2K[" + "".join(parts) + f"] {db:6.1f} dB")
+    sys.stdout.flush()
+
+
+def run_record(args, device_idx, device_info, output_path, duration):
+    """Capture microphone audio to WAV. Blocks until duration expires or
+    the user hits Ctrl+C. Returns the wall-clock recording duration."""
+    q = queue.Queue()
+    stop_event = threading.Event()
+
+    def handle_signal(sig, frame):
+        stop_event.set()
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    if duration > 0:
+        threading.Timer(duration, stop_event.set).start()
+
+    def callback(indata, frames, time_info, status):
+        if status:
+            # Input overflow or similar — surface it but don't stop.
+            print(f"\raudio status: {status}", file=sys.stderr, end="\n")
+        q.put(indata.copy())
+
+    started_at = time.monotonic()
+    peak_db = VU_DB_FLOOR
+    frames_since_peak = VU_PEAK_HOLD_FRAMES
+    next_render = started_at
+
+    wav = sf.SoundFile(
+        output_path, mode="w",
+        samplerate=args.sample_rate,
+        channels=CHANNELS,
+        subtype=SUBTYPE,
+    )
+    stream = sd.InputStream(
+        samplerate=args.sample_rate,
+        device=device_idx,
+        channels=CHANNELS,
+        dtype=DTYPE,
+        blocksize=BLOCK_SIZE,
+        callback=callback,
+    )
+    try:
+        with stream, wav:
+            if not args.quiet:
+                sys.stdout.write("\x1b[?25l")  # hide cursor
+                sys.stdout.flush()
+            while not stop_event.is_set():
+                try:
+                    data = q.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                wav.write(data)
+                if args.quiet:
+                    continue
+                # RMS over the captured frames, in dBFS.
+                rms = float(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
+                db = 20.0 * np.log10(rms / 32768.0) if rms > 0 else VU_DB_FLOOR
+                now = time.monotonic()
+                if now >= next_render:
+                    if db > peak_db:
+                        peak_db = db
+                        frames_since_peak = 0
+                    elif frames_since_peak < VU_PEAK_HOLD_FRAMES:
+                        frames_since_peak += 1
+                    else:
+                        peak_db = max(VU_DB_FLOOR, peak_db - VU_PEAK_DECAY_PER_FRAME)
+                    render_vu(db, peak_db)
+                    next_render = now + 1.0 / VU_TARGET_FPS
+            # Drain any remaining frames the callback put on the queue.
+            while True:
+                try:
+                    data = q.get_nowait()
+                except queue.Empty:
+                    break
+                wav.write(data)
+    except sd.PortAudioError as e:
+        if not args.quiet:
+            sys.stdout.write("\x1b[?25h\n")  # restore cursor
+            sys.stdout.flush()
+        print(f"error: audio device error: {e}", file=sys.stderr)
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        return None, EXIT_MIC_ISSUE
+    finally:
+        if not args.quiet:
+            sys.stdout.write("\x1b[?25h\n")
+            sys.stdout.flush()
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+    return time.monotonic() - started_at, EXIT_OK
+
+
 def main(argv=None):
     args = parse_flags(argv)
 
@@ -187,12 +329,13 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         sys.exit(EXIT_GENERIC)
 
-    print("voice recorder scaffold ready (no recording yet — coming next commit)")
-    print(f"  device:      {device_info['name']} (index {device_idx})")
-    print(f"  sample rate: {args.sample_rate}")
-    print(f"  duration:    {duration}s")
-    print(f"  output:      {output_path}")
-    print(f"  countdown:   {args.countdown}s")
+    print(f"recording {device_info['name']} @ {args.sample_rate}Hz to {output_path}")
+    actual, code = run_record(args, device_idx, device_info, output_path, duration)
+    if code != EXIT_OK:
+        sys.exit(code)
+    print(f"saved to {output_path} ({actual:.1f}s)")
+    print(output_path)
+    sys.exit(EXIT_OK)
 
 
 if __name__ == "__main__":
