@@ -11,11 +11,13 @@ import { Preview } from './components/Preview'
 import { Timeline } from './components/Timeline'
 import { Inspector } from './components/Inspector'
 import { TopBar } from './components/TopBar'
+import { ExportModal } from './components/ExportModal'
 
 function App() {
   const [project, dispatch] = useReducer(projectReducer, initialProject)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   // Auto-load the saved project on mount, then auto-save on every change.
   useEffect(() => {
@@ -42,7 +44,7 @@ function App() {
           dispatch({ type: 'NEW_PROJECT' })
           setSelectedClipId(null)
         }}
-        onExport={() => { /* TODO: export modal */ }}
+        onExport={() => setExporting(true)}
         onExportProjectJson={() => {
           const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
           const url = URL.createObjectURL(blob)
@@ -88,6 +90,13 @@ function App() {
           })()}
         </section>
       </main>
+
+      {exporting && (
+        <ExportModal
+          project={project}
+          onClose={() => setExporting(false)}
+        />
+      )}
     </div>
   )
 }
