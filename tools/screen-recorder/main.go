@@ -6,17 +6,24 @@
 //	screen-recorder [flags]
 //
 // In its default mode it arms, shows a 3-second countdown, and starts
-// recording. Ctrl+C stops and finalizes the file. The MP4 and a JSON
-// sidecar with metadata land in ./recordings/ by default.
+// recording. Ctrl+C stops and finalizes the file. The MP4 lands in
+// ./recordings/ by default.
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kbinani/screenshot"
@@ -144,6 +151,228 @@ func listDisplays() error {
 	return enc.Encode(displays)
 }
 
+// resolveOutputPath returns the final output path. If the user passed an
+// explicit --output, use it (error if it already exists). Otherwise generate
+// a timestamped filename in ./recordings/ and auto-suffix on collision.
+func resolveOutputPath(explicit string) (string, error) {
+	if explicit != "" {
+		if _, err := os.Stat(explicit); err == nil {
+			return "", fmt.Errorf("output file already exists: %s", explicit)
+		}
+		return explicit, nil
+	}
+	if err := os.MkdirAll("recordings", 0o755); err != nil {
+		return "", fmt.Errorf("create recordings dir: %w", err)
+	}
+	base := fmt.Sprintf("recording-%s.mp4", time.Now().Format("2006-01-02T15-04-05"))
+	candidate := filepath.Join("recordings", base)
+	for i := 1; ; i++ {
+		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		}
+		ext := filepath.Ext(base)
+		stem := strings.TrimSuffix(base, ext)
+		candidate = filepath.Join("recordings", fmt.Sprintf("%s-%d%s", stem, i, ext))
+	}
+}
+
+// defaultBitrate returns a sensible bitrate for the given codec and resolution.
+func defaultBitrate(codec string, w, h int) string {
+	pixels := w * h
+	switch {
+	case pixels >= 3840*2160:
+		if codec == "h265" {
+			return "12M"
+		}
+		return "24M"
+	case pixels >= 1920*1080:
+		if codec == "h265" {
+			return "4M"
+		}
+		return "8M"
+	default:
+		if codec == "h265" {
+			return "2M"
+		}
+		return "4M"
+	}
+}
+
+// ffmpegArgs returns the argv for the ffmpeg subprocess. Raw RGBA frames
+// (kbinani/screenshot's image.RGBA byte order) are piped on stdin and
+// ffmpeg transcodes to the chosen codec.
+func ffmpegArgs(output string, w, h, fps int, codec, bitrate string) []string {
+	var codecName, pixFmt string
+	switch codec {
+	case "h264":
+		codecName = "libx264"
+		pixFmt = "yuv420p"
+	case "h265":
+		codecName = "libx265"
+		pixFmt = "yuv420p10le"
+	}
+	args := []string{
+		"-y",
+		"-f", "rawvideo",
+		"-pix_fmt", "rgba",
+		"-s", fmt.Sprintf("%dx%d", w, h),
+		"-r", strconv.Itoa(fps),
+		"-i", "pipe:0",
+		"-c:v", codecName,
+		"-preset", "veryfast",
+		"-pix_fmt", pixFmt,
+	}
+	if bitrate != "" {
+		args = append(args, "-b:v", bitrate)
+	}
+	args = append(args,
+		"-movflags", "+faststart",
+		"-an",
+		output,
+	)
+	return args
+}
+
+// runRecord captures the selected display and pipes frames to ffmpeg.
+func runRecord(f *flags) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Ctrl+C cancels the whole pipeline.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigCh:
+			fmt.Fprintf(os.Stderr, "\nreceived %s, finalizing...\n", sig)
+			cancel()
+		}
+	}()
+
+	// Countdown.
+	if f.countdown > 0 && !f.now {
+		fmt.Fprintf(os.Stderr, "starting in %d seconds... (Ctrl+C to cancel)\n", f.countdown)
+		for i := f.countdown; i > 0; i-- {
+			fmt.Fprintf(os.Stderr, "%d...\n", i)
+			select {
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				fmt.Fprintln(os.Stderr, "cancelled")
+				return nil
+			}
+		}
+	}
+
+	ffmpegPath, err := findFFmpeg()
+	if err != nil {
+		return &exitError{code: exitFFmpegMissing, err: err}
+	}
+
+	bounds := screenshot.GetDisplayBounds(f.display)
+	w, h := bounds.Dx(), bounds.Dy()
+	if f.width > 0 && f.height > 0 {
+		w, h = f.width, f.height
+	}
+
+	outputPath, err := resolveOutputPath(f.output)
+	if err != nil {
+		return &exitError{code: exitGenericError, err: err}
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return &exitError{code: exitGenericError, err: fmt.Errorf("create output dir: %w", err)}
+	}
+
+	bitrate := f.bitrate
+	if bitrate == "" {
+		bitrate = defaultBitrate(f.codec, w, h)
+	}
+
+	args := ffmpegArgs(outputPath, w, h, f.fps, f.codec, bitrate)
+	ffmpeg := exec.Command(ffmpegPath, args...)
+	var ffmpegStderr bytes.Buffer
+	ffmpeg.Stderr = &ffmpegStderr
+
+	stdin, err := ffmpeg.StdinPipe()
+	if err != nil {
+		return &exitError{code: exitGenericError, err: fmt.Errorf("ffmpeg stdin: %w", err)}
+	}
+	if err := ffmpeg.Start(); err != nil {
+		return &exitError{code: exitGenericError, err: fmt.Errorf("start ffmpeg: %w", err)}
+	}
+
+	fmt.Fprintf(os.Stderr, "recording %dx%d @ %dfps (%s) to %s\n", w, h, f.fps, f.codec, outputPath)
+	recordingStart := time.Now()
+
+	// Auto-stop after --duration.
+	if f.duration > 0 {
+		go func() {
+			select {
+			case <-time.After(f.duration):
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	// Per-second elapsed-time line.
+	if !f.quiet {
+		go func() {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					elapsed := time.Since(recordingStart).Round(time.Second)
+					fmt.Fprintf(os.Stderr, "  elapsed: %s\n", elapsed)
+				}
+			}
+		}()
+	}
+
+	// Capture loop. The ticker enforces the frame rate; we drop frames on
+	// slow captures rather than buffering so wall-clock time matches the
+	// recording's duration.
+	tickInterval := time.Second / time.Duration(f.fps)
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	capture := func() error {
+		img, err := screenshot.CaptureRect(bounds)
+		if err != nil {
+			return fmt.Errorf("capture: %w", err)
+		}
+		if _, err := stdin.Write(img.Pix); err != nil {
+			return fmt.Errorf("write frame: %w", err)
+		}
+		return nil
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			stdin.Close()
+			if err := ffmpeg.Wait(); err != nil {
+				fmt.Fprintf(os.Stderr, "ffmpeg failed: %v\n%s\n", err, ffmpegStderr.String())
+				return &exitError{code: exitGenericError, err: err}
+			}
+			fmt.Fprintf(os.Stderr, "saved to %s (%s)\n", outputPath, time.Since(recordingStart).Round(time.Second))
+			fmt.Println(outputPath)
+			return nil
+		case <-ticker.C:
+			if err := capture(); err != nil {
+				stdin.Close()
+				ffmpeg.Wait()
+				return &exitError{code: exitGenericError, err: err}
+			}
+		}
+	}
+}
+
 func main() {
 	f, err := parseFlags()
 	if err != nil {
@@ -160,17 +389,18 @@ func main() {
 		os.Exit(exitOK)
 	}
 
-	if _, err := findFFmpeg(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(exitFFmpegMissing)
+	if f.selfTest {
+		// Not implemented yet. Will land in a follow-up commit.
+		fmt.Fprintln(os.Stderr, "error: --self-test not yet implemented")
+		os.Exit(exitGenericError)
 	}
 
-	// The recording path lands in the next commit. For now, scaffold only —
-	// print the parsed flags so we can confirm parsing works end-to-end.
-	fmt.Fprintf(os.Stderr, "screen recorder scaffold ready\n")
-	fmt.Fprintf(os.Stderr, "  output:     %q\n", f.output)
-	fmt.Fprintf(os.Stderr, "  duration:   %v\n", f.duration)
-	fmt.Fprintf(os.Stderr, "  fps:        %d\n", f.fps)
-	fmt.Fprintf(os.Stderr, "  codec:      %s\n", f.codec)
-	fmt.Fprintf(os.Stderr, "  countdown:  %d\n", f.countdown)
+	if err := runRecord(f); err != nil {
+		if ee, ok := err.(*exitError); ok {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(ee.code)
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(exitGenericError)
+	}
 }
