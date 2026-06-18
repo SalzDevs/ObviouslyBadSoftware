@@ -135,3 +135,51 @@
   font-size: 12px;
   margin: 0;
 }
+
+/* Timeline */
+.timeline-inner {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.timeline-strip {
+  flex: 1;
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+  min-height: 60px;
+  overflow: hidden;
+}
+.timeline-clip {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  cursor: pointer;
+  overflow: hidden;
+  user-select: none;
+  min-width: 0;
+}
+.timeline-clip:hover { border-color: var(--border-strong); }
+.timeline-clip.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.timeline-clip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.timeline-clip-duration {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}

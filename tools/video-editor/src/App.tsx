@@ -8,6 +8,7 @@ import {
 } from './state'
 import { MediaBin } from './components/MediaBin'
 import { Preview } from './components/Preview'
+import { Timeline } from './components/Timeline'
 
 function App() {
   const [project, dispatch] = useReducer(projectReducer, initialProject)
@@ -49,8 +50,11 @@ function App() {
         </section>
 
         <section className="panel timeline">
-          <h2>Timeline</h2>
-          <p className="empty">no clips</p>
+          <Timeline
+            clips={project.clips}
+            selectedClipId={selectedClipId}
+            onSelect={setSelectedClipId}
+          />
         </section>
 
         <section className="panel inspector">
