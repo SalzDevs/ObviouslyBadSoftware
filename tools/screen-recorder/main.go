@@ -352,12 +352,22 @@ func runRecord(f *flags) error {
 		return nil
 	}
 
+	// permissionError wraps a capture error with exit 3 + a macOS-specific
+	// hint when the failure looks like a missing Screen Recording permission.
+	permissionError := func(err error) error {
+		return &exitError{
+			code: exitPermissionDenied,
+			err: fmt.Errorf("%w\n\nScreen Recording permission denied.\n\nGrant access at:\n  System Settings → Privacy & Security → Screen Recording\n\nEnable your terminal app (Terminal, iTerm, VS Code, etc.), then quit and re-open it for the permission to take effect.", err),
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			stdin.Close()
 			if err := ffmpeg.Wait(); err != nil {
 				fmt.Fprintf(os.Stderr, "ffmpeg failed: %v\n%s\n", err, ffmpegStderr.String())
+				os.Remove(outputPath)
 				return &exitError{code: exitGenericError, err: err}
 			}
 			fmt.Fprintf(os.Stderr, "saved to %s (%s)\n", outputPath, time.Since(recordingStart).Round(time.Second))
@@ -367,6 +377,10 @@ func runRecord(f *flags) error {
 			if err := capture(); err != nil {
 				stdin.Close()
 				ffmpeg.Wait()
+				os.Remove(outputPath)
+				if strings.Contains(err.Error(), "cannot capture display") {
+					return permissionError(err)
+				}
 				return &exitError{code: exitGenericError, err: err}
 			}
 		}
