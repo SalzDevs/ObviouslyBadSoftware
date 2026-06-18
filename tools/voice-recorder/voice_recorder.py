@@ -361,6 +361,46 @@ def run_record(args, device_idx, device_info, output_path, duration):
     return time.monotonic() - started_at, EXIT_OK
 
 
+def run_self_test(args_factory):
+    """Record 1s to a temp file and verify with ffprobe. Returns True on OK.
+    Used as a readiness check for new machines and agentic setup."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        print("error: ffprobe not found on PATH (install ffmpeg)", file=sys.stderr)
+        return False
+
+    tmp_dir = tempfile.mkdtemp(prefix="voice-recorder-selftest-")
+    tmp_wav = os.path.join(tmp_dir, "test.wav")
+    try:
+        test_args = args_factory()
+        test_args.output = tmp_wav
+        test_args.duration = "1s"
+        test_args.now = True
+        test_args.countdown = 0
+        test_args.quiet = True
+        test_args.no_sidecar = True
+        device_idx, device_info = resolve_device(test_args.device)
+        actual, code = run_record(test_args, device_idx, device_info, tmp_wav, 1.0)
+        if code != EXIT_OK:
+            return False
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries",
+             "format=duration:stream=codec_name,sample_rate,channels",
+             "-of", "default=noprint_wrappers=1", tmp_wav],
+            capture_output=True, text=True,
+        )
+        if out.returncode != 0:
+            print(f"error: ffprobe failed: {out.stderr.strip()}", file=sys.stderr)
+            return False
+        return True
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def main(argv=None):
     args = parse_flags(argv)
 
@@ -370,8 +410,14 @@ def main(argv=None):
         sys.exit(EXIT_OK)
 
     if args.self_test:
-        print("error: --self-test not yet implemented", file=sys.stderr)
-        sys.exit(EXIT_GENERIC)
+        def _factory():
+            return parse_flags([])
+        if run_self_test(_factory):
+            print("OK")
+            sys.exit(EXIT_OK)
+        else:
+            print("self-test failed", file=sys.stderr)
+            sys.exit(EXIT_MIC_ISSUE)
 
     # Validate flags
     if args.sample_rate <= 0:
