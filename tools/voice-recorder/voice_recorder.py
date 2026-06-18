@@ -167,6 +167,29 @@ def resolve_device(spec):
     return matches[0]
 
 
+def sidecar_path_for(wav_path):
+    """Return the JSON sidecar path: foo/voice.wav → foo/voice.json."""
+    stem, _ = os.path.splitext(wav_path)
+    return stem + ".json"
+
+
+# sidecarMeta is the JSON schema written next to each WAV. Mirrors the
+# screen recorder's sidecar but with audio fields instead of video ones.
+SIDECAR_META = "__main__"  # placeholder; see write_sidecar for actual dict
+
+
+def write_sidecar(wav_path, meta):
+    """Write the sidecar JSON next to the WAV. Called only after the WAV
+    is fully flushed and closed, so file_size_bytes always matches disk."""
+    size = os.path.getsize(wav_path)
+    meta = dict(meta)
+    meta["file_size_bytes"] = size
+    sidecar = sidecar_path_for(wav_path)
+    with open(sidecar, "w") as f:
+        json.dump(meta, f, indent=2)
+    return sidecar
+
+
 def render_vu(db, peak_db, width=VU_WIDTH):
     """Render a single VU meter line in place on the terminal.
 
@@ -380,10 +403,28 @@ def main(argv=None):
         sys.exit(EXIT_GENERIC)
 
     print(f"recording {device_info['name']} @ {args.sample_rate}Hz to {output_path}")
+    recording_start = time.time()
     actual, code = run_record(args, device_idx, device_info, output_path, duration)
     if code != EXIT_OK:
         sys.exit(code)
     print(f"saved to {output_path} ({actual:.1f}s)")
+    if not args.no_sidecar:
+        try:
+            sidecar = write_sidecar(output_path, {
+                "tool": "salzdevs-voice-recorder",
+                "tool_version": __version__,
+                "start_time": datetime.fromtimestamp(recording_start).isoformat(timespec="seconds"),
+                "duration_seconds": round(actual, 3),
+                "device": device_info["name"],
+                "device_index": device_idx,
+                "sample_rate": args.sample_rate,
+                "channels": CHANNELS,
+                "bit_depth": 16,
+                "file_path": output_path,
+            })
+            print(f"sidecar: {sidecar}")
+        except OSError as e:
+            print(f"warning: sidecar write failed: {e}", file=sys.stderr)
     print(output_path)
     sys.exit(EXIT_OK)
 
