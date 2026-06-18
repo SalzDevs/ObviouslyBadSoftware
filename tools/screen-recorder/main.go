@@ -29,6 +29,26 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
+const toolVersion = "0.1.0"
+
+// sidecarMeta is the JSON schema written next to each MP4 (same basename,
+// .json extension). Downstream tools (the video editor, agentic pipelines)
+// can read this without shelling out to ffprobe.
+type sidecarMeta struct {
+	Tool              string  `json:"tool"`
+	ToolVersion       string  `json:"tool_version"`
+	StartTime         string  `json:"start_time"`
+	DurationSeconds   float64 `json:"duration_seconds"`
+	DisplayIndex      int     `json:"display_index"`
+	NativeResolution  string  `json:"native_resolution"`
+	CaptureResolution string  `json:"capture_resolution"`
+	FPS               int     `json:"fps"`
+	Codec             string  `json:"codec"`
+	Bitrate           string  `json:"bitrate"`
+	FilePath          string  `json:"file_path"`
+	FileSizeBytes     int64   `json:"file_size_bytes"`
+}
+
 // Exit codes returned to the shell. Stable; agents rely on them.
 const (
 	exitOK               = 0
@@ -196,6 +216,28 @@ func defaultBitrate(codec string, w, h int) string {
 		}
 		return "4M"
 	}
+}
+
+// sidecarPathFor returns the JSON sidecar path corresponding to an MP4 path:
+// "foo/bar.mp4" → "foo/bar.json".
+func sidecarPathFor(mp4Path string) string {
+	return strings.TrimSuffix(mp4Path, filepath.Ext(mp4Path)) + ".json"
+}
+
+// writeSidecar writes the metadata JSON next to the recording. Called only
+// after ffmpeg exits successfully so the file_path and duration_seconds
+// always match what's on disk.
+func writeSidecar(mp4Path string, meta sidecarMeta) error {
+	fi, err := os.Stat(mp4Path)
+	if err != nil {
+		return fmt.Errorf("stat mp4: %w", err)
+	}
+	meta.FileSizeBytes = fi.Size()
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	return os.WriteFile(sidecarPathFor(mp4Path), data, 0o644)
 }
 
 // ffmpegArgs returns the argv for the ffmpeg subprocess. Raw RGBA frames
@@ -378,7 +420,27 @@ func runRecord(f *flags) error {
 				os.Remove(outputPath)
 				return &exitError{code: exitGenericError, err: err}
 			}
-			fmt.Fprintf(os.Stderr, "saved to %s (%s)\n", outputPath, time.Since(recordingStart).Round(time.Second))
+			actualDuration := time.Since(recordingStart)
+			fmt.Fprintf(os.Stderr, "saved to %s (%s)\n", outputPath, actualDuration.Round(time.Second))
+			if !f.noSidecar {
+				if err := writeSidecar(outputPath, sidecarMeta{
+					Tool:              "salzdevs-screen-recorder",
+					ToolVersion:       toolVersion,
+					StartTime:         recordingStart.UTC().Format(time.RFC3339),
+					DurationSeconds:   actualDuration.Seconds(),
+					DisplayIndex:      f.display,
+					NativeResolution:  fmt.Sprintf("%dx%d", screenshot.GetDisplayBounds(f.display).Dx(), screenshot.GetDisplayBounds(f.display).Dy()),
+					CaptureResolution: fmt.Sprintf("%dx%d", w, h),
+					FPS:               f.fps,
+					Codec:             f.codec,
+					Bitrate:           bitrate,
+					FilePath:          outputPath,
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: sidecar write failed: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "sidecar: %s\n", sidecarPathFor(outputPath))
+				}
+			}
 			fmt.Println(outputPath)
 			return nil
 		case <-ticker.C:
