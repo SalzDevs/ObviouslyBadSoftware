@@ -9,6 +9,7 @@ import {
 import { MediaBin } from './components/MediaBin'
 import { Preview } from './components/Preview'
 import { Timeline } from './components/Timeline'
+import { Inspector } from './components/Inspector'
 
 function App() {
   const [project, dispatch] = useReducer(projectReducer, initialProject)
@@ -58,8 +59,10 @@ function App() {
         </section>
 
         <section className="panel inspector">
-          <h2>Inspector</h2>
-          <p className="empty">select a clip to edit {selectedClipId ? `(${selectedClipId})` : ''}</p>
+          <Inspector
+            clip={project.clips.find(c => c.id === selectedClipId) ?? null}
+            dispatch={dispatch}
+          />
         </section>
       </main>
     </div>
