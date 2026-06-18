@@ -7,6 +7,7 @@ import {
   saveProject,
 } from './state'
 import { MediaBin } from './components/MediaBin'
+import { Preview } from './components/Preview'
 
 function App() {
   const [project, dispatch] = useReducer(projectReducer, initialProject)
@@ -42,8 +43,9 @@ function App() {
         </section>
 
         <section className="panel preview">
-          <h2>Preview</h2>
-          <p className="empty">no clip selected</p>
+          <Preview
+            clip={project.clips.find(c => c.id === selectedClipId) ?? null}
+          />
         </section>
 
         <section className="panel timeline">
