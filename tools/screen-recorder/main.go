@@ -224,6 +224,47 @@ func sidecarPathFor(mp4Path string) string {
 	return strings.TrimSuffix(mp4Path, filepath.Ext(mp4Path)) + ".json"
 }
 
+// runSelfTest records 2 seconds to a temp file and verifies the result
+// with ffprobe. Exits 0 with "OK" or 1 with the error. Intended as a
+// readiness check for new machines and agentic setup.
+func runSelfTest() error {
+	tmp, err := os.CreateTemp("", "screen-recorder-selftest-*.mp4")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmp.Close()
+	// runRecord refuses to overwrite an existing file at --output, so remove
+	// the just-created temp file and let ffmpeg write to a fresh path.
+	if err := os.Remove(tmp.Name()); err != nil {
+		return fmt.Errorf("remove pre-created temp: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+
+	testFlags := &flags{
+		now:         true,
+		output:      tmp.Name(),
+		duration:    2 * time.Second,
+		fps:         30,
+		codec:       "h264",
+		countdown:   0,
+		quiet:       true,
+		noSidecar:   true,
+	}
+	if err := runRecord(testFlags); err != nil {
+		return err
+	}
+
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return fmt.Errorf("ffprobe not found on PATH: %w", err)
+	}
+	out, err := exec.Command(ffprobePath, "-v", "error", "-show_format", "-show_streams", tmp.Name()).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffprobe failed: %w\n%s", err, out)
+	}
+	return nil
+}
+
 // writeSidecar writes the metadata JSON next to the recording. Called only
 // after ffmpeg exits successfully so the file_path and duration_seconds
 // always match what's on disk.
@@ -479,9 +520,12 @@ func main() {
 	}
 
 	if f.selfTest {
-		// Not implemented yet. Will land in a follow-up commit.
-		fmt.Fprintln(os.Stderr, "error: --self-test not yet implemented")
-		os.Exit(exitGenericError)
+		if err := runSelfTest(); err != nil {
+			fmt.Fprintln(os.Stderr, "self-test failed:", err)
+			os.Exit(exitGenericError)
+		}
+		fmt.Println("OK")
+		os.Exit(exitOK)
 	}
 
 	if err := runRecord(f); err != nil {
