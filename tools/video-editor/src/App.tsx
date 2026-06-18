@@ -55,6 +55,7 @@ function App() {
             clips={project.clips}
             selectedClipId={selectedClipId}
             onSelect={setSelectedClipId}
+            dispatch={dispatch}
           />
         </section>
 

@@ -183,6 +183,12 @@
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+.timeline-clip.drop-left {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.timeline-clip.drop-right {
+  box-shadow: inset -3px 0 0 var(--accent);
+}
 
 /* Inspector */
 .inspector-inner {
